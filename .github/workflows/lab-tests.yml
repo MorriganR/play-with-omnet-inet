@@ -1,0 +1,175 @@
+name: "Test: PrT"
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    # nothing
+
+permissions:
+  contents: read
+
+jobs:
+  module-tests:
+    env:
+      CCACHE_DIR: /home/runner/work/ccache
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mode: ["debug", "release"]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: omnetpp/omnetpp
+          path: omnetpp
+          ref: omnetpp-6.x
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.actor }}/inet
+          ref: dev_rack
+          path: inet
+
+      - uses: actions/checkout@v4
+        with:
+          path: thisrepo
+
+      - uses: actions/checkout@v4
+        # if: ${{ github.actor == github.repositiry_owner }}
+        with:
+          repository: ${{ github.actor }}/TCPPrague
+          token: ${{ secrets.GH_PAT_PrT }}
+          path: devprivaterepo
+
+      - run: mkdir -p $CCACHE_DIR
+
+      - uses: actions/cache/restore@v4
+        with:
+          key: native-${{ matrix.mode }}-ccache-${{ github.run_id }}
+          restore-keys: native-${{ matrix.mode }}-ccache
+          path: |
+            /home/runner/work/ccache
+            ${{ github.workspace }}/venv
+
+      - name: Prepare VM apt-get
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends git wget curl ca-certificates \
+            make ccache clang lld gdb bison flex perl doxygen graphviz libxml2-dev zlib1g-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libz3-dev libopenscenegraph-dev python3
+
+      - name: Build Omnetpp
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          # source GITHUB inet-framework/inet/_scripts/github/build-omnetpp.sh
+          export PATH=/usr/lib/ccache:$PATH
+          ccache -s
+          cd $GITHUB_WORKSPACE/omnetpp
+          cp configure.user.dist configure.user
+          . setenv -f
+          ./configure WITH_LIBXML=yes WITH_QTENV=no WITH_OSG=yes WITH_OSGEARTH=no
+          make MODE=$MODE -j $(nproc) base
+          pwd
+          ccache -s
+
+      - name: Prepare VM pyhton
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          echo "::group::Installing pip"
+          sudo apt install -y python3-pip
+          echo "::endgroup::"
+          echo "::group::Installing Python packages"
+          [[ ! -d $GITHUB_WORKSPACE/venv ]] && python3 -m venv $GITHUB_WORKSPACE/venv
+          source $GITHUB_WORKSPACE/venv/bin/activate
+          python3 -m pip install --upgrade matplotlib numpy pandas seaborn scipy ipython posix-ipc cppyy sewar dask distributed optimparallel requests setuptools
+          echo "::endgroup::"
+          pwd
+
+      - name: Build Inet
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          echo "::group::Header"
+          export PATH=/usr/lib/ccache:$PATH
+          ccache -s
+          cd $GITHUB_WORKSPACE/omnetpp
+          . setenv -f
+          cd $GITHUB_WORKSPACE
+          source $GITHUB_WORKSPACE/venv/bin/activate
+          echo "::endgroup::"
+          # source GITHUB inet-framework/inet/_scripts/github/build-inet.sh
+          cd $GITHUB_WORKSPACE/inet
+          . setenv -f
+          opp_featuretool enable all
+          opp_featuretool disable SelfDoc
+          make makefiles
+          make MODE=$MODE -j $(nproc)
+          pwd
+          ccache -s
+
+      - uses: actions/cache/save@v4
+        with:
+          key: native-${{ matrix.mode }}-ccache-${{ github.run_id }}
+          path: |
+            /home/runner/work/ccache
+            ${{ github.workspace }}/venv
+
+      - name: test hack
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          echo "::group::Header"
+          export PATH=/usr/lib/ccache:$PATH
+          export CCACHE_DIR=/home/runner/work/ccache
+          cd $GITHUB_WORKSPACE/omnetpp
+          . setenv -f
+          cd $GITHUB_WORKSPACE
+          source $GITHUB_WORKSPACE/venv/bin/activate
+          cd $GITHUB_WORKSPACE/inet
+          . setenv -f
+          echo "::endgroup::"
+          cd $GITHUB_WORKSPACE/inet
+          pwd
+          #rm -f $GITHUB_WORKSPACE/inet/tests/module/*.* || :
+          #cp $GITHUB_WORKSPACE/devprivaterepo/tests/module/* $GITHUB_WORKSPACE/inet/tests/module/ || :
+          #inet_run_module_tests || :
+
+      - name: Play with tests
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          echo "::group::Header"
+          export PATH=/usr/lib/ccache:$PATH
+          export CCACHE_DIR=/home/runner/work/ccache
+          cd $GITHUB_WORKSPACE
+          source $GITHUB_WORKSPACE/venv/bin/activate
+          cd $GITHUB_WORKSPACE/omnetpp
+          . setenv -f
+          cd $GITHUB_WORKSPACE/inet
+          . setenv -f
+          echo "::endgroup::"
+          cd $GITHUB_WORKSPACE
+          pwd
+          ls -la
+          ls -la ./thisrepo || :
+          ls -la ./devprivaterepo || :
+          cd $GITHUB_WORKSPACE/inet/src
+          make MODE=$MODE -j $(nproc) all
+          cd $GITHUB_WORKSPACE/devprivaterepo
+          cp $GITHUB_WORKSPACE/thisrepo/foo/makemakefiles ./ || :
+          make -f makemakefiles
+          make MODE=$MODE -j $(nproc) all || :
+          ls -la
+          ls -la ./src
+          ls -la ./simulations
+          cd ./simulations
+          ../src/src_dbg -r 0 -m -u Cmdenv -c General -n ../src:.:../../inet/examples:../../inet/showcases:../../inet/src:../../inet/tests/validation:../../inet/tests/networks:../../inet/tutorials -x "inet.common.selfdoc;inet.emulation;inet.examples.emulation;inet.examples.voipstream;inet.showcases.emulation;inet.showcases.visualizer.osg;inet.validation.tsn;inet.visualizer.osg" --image-path=../../inet/images -l ../../inet/src/INET omnetpp.ini || ../src/src -r 0 -m -u Cmdenv -c General -n ../src:.:../../inet/examples:../../inet/showcases:../../inet/src:../../inet/tests/validation:../../inet/tests/networks:../../inet/tutorials -x "inet.common.selfdoc;inet.emulation;inet.examples.emulation;inet.examples.voipstream;inet.showcases.emulation;inet.showcases.visualizer.osg;inet.validation.tsn;inet.visualizer.osg" --image-path=../../inet/images -l ../../inet/src/INET omnetpp.ini || :
+          pwd
+          ls -la
+          ls -la ./results || :
